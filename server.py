@@ -8,7 +8,6 @@ from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import JSONResponse, RedirectResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 from mcp.server.fastmcp import FastMCP
 
 from google_ads_client import get_accessible_customers, execute_query
@@ -198,33 +197,23 @@ async def health():
     return {"status": "ok"}
 
 
-# Auth middleware that wraps the MCP sub-app
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
-        token = auth_header.removeprefix("Bearer ")
-        if not _is_valid_token(token):
-            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
-        return await call_next(request)
+# Get the raw MCP ASGI app
+mcp_asgi = mcp.streamable_http_app()
 
 
-# Create the MCP ASGI app and wrap it with auth
-mcp_app = mcp.streamable_http_app()
+# Custom ASGI middleware that checks auth then delegates to MCP app
+async def authed_mcp_app(scope, receive, send):
+    if scope["type"] == "http":
+        headers = dict(scope.get("headers", []))
+        auth_header = headers.get(b"authorization", b"").decode()
+        if not auth_header.startswith("Bearer ") or not _is_valid_token(auth_header.removeprefix("Bearer ")):
+            response = JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+            await response(scope, receive, send)
+            return
+    await mcp_asgi(scope, receive, send)
 
-# Wrap MCP app in a Starlette app with auth middleware
-from starlette.applications import Starlette
-from starlette.routing import Mount
 
-authed_mcp = Starlette(
-    routes=[Mount("/", app=mcp_app)],
-    middleware=[
-        (BearerAuthMiddleware, {}),
-    ],
-)
-
-app.mount("/mcp", authed_mcp)
+app.mount("/mcp", authed_mcp_app)
 
 
 if __name__ == "__main__":
