@@ -13,7 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from google_ads_client import get_accessible_customers, execute_query
 
 
-mcp = FastMCP("Google Ads MCP Server")
+mcp = FastMCP("Google Ads MCP Server", streamable_http_path="/")
 
 
 @mcp.tool()
