@@ -1,7 +1,8 @@
 import os
 import json
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
 
 from google_ads_client import get_accessible_customers, execute_query
@@ -42,7 +43,7 @@ async def validate_bearer_token(request: Request, call_next):
     if auth_token:
         auth_header = request.headers.get("Authorization", "")
         if auth_header != f"Bearer {auth_token}":
-            raise HTTPException(status_code=401, detail="Unauthorized")
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
     return await call_next(request)
 
