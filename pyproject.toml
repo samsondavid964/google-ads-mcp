@@ -1,0 +1,14 @@
+[project]
+name = "google-ads-mcp-server"
+version = "0.1.0"
+description = "Remote MCP server for querying Google Ads data via Claude"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.26.0",
+    "google-ads>=30.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
+]
+
+[tool.setuptools]
+py-modules = ["server", "google_ads_client"]

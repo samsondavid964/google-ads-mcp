@@ -1,0 +1,12 @@
+# Credentials and secrets
+credentials.json
+service-account.json
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Keep the example env file
+!.env.example

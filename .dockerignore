@@ -1,0 +1,10 @@
+credentials.json
+service-account.json
+.env
+.env.example
+.git
+.gitignore
+.dockerignore
+.claude
+README.md
+__pycache__
