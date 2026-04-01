@@ -2,10 +2,13 @@ import os
 import json
 import secrets
 import time
+import hashlib
+import base64
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import JSONResponse, RedirectResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from mcp.server.fastmcp import FastMCP
 
 from google_ads_client import get_accessible_customers, execute_query
@@ -34,8 +37,6 @@ def search(customer_id: str, query: str) -> str:
     return json.dumps(rows, indent=2)
 
 
-app = FastAPI()
-
 # In-memory store for OAuth authorization codes and access tokens
 _auth_codes: dict[str, dict] = {}
 _access_tokens: dict[str, dict] = {}
@@ -57,11 +58,25 @@ PUBLIC_PATHS = {
 }
 
 
+def _is_valid_token(token: str) -> bool:
+    """Check if a bearer token is valid."""
+    if token in _access_tokens:
+        return True
+    mcp_token = os.environ.get("MCP_AUTH_TOKEN")
+    if mcp_token and token == mcp_token:
+        return True
+    return False
+
+
 def _get_base_url(request: Request) -> str:
     """Get the external base URL from the request."""
     scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
     host = request.headers.get("x-forwarded-host", request.url.netloc)
     return f"{scheme}://{host}"
+
+
+# Build the main FastAPI app
+app = FastAPI()
 
 
 @app.get("/.well-known/oauth-authorization-server")
@@ -147,8 +162,6 @@ async def oauth_token(
 
         # PKCE verification
         if stored.get("code_challenge"):
-            import hashlib
-            import base64
             expected = base64.urlsafe_b64encode(
                 hashlib.sha256(code_verifier.encode()).digest()
             ).rstrip(b"=").decode()
@@ -180,38 +193,38 @@ async def oauth_token(
     return JSONResponse(status_code=400, content={"error": "unsupported_grant_type"})
 
 
-@app.middleware("http")
-async def validate_bearer_token(request: Request, call_next):
-    path = request.url.path
-
-    # Skip auth for public endpoints
-    if path in PUBLIC_PATHS:
-        return await call_next(request)
-
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
-
-    token = auth_header.removeprefix("Bearer ")
-
-    # Accept tokens issued by our OAuth flow
-    if token in _access_tokens:
-        return await call_next(request)
-
-    # Also accept the static MCP_AUTH_TOKEN for direct testing
-    mcp_token = os.environ.get("MCP_AUTH_TOKEN")
-    if mcp_token and token == mcp_token:
-        return await call_next(request)
-
-    return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
-
-
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
 
-app.mount("/mcp", mcp.streamable_http_app())
+# Auth middleware that wraps the MCP sub-app
+class BearerAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+        token = auth_header.removeprefix("Bearer ")
+        if not _is_valid_token(token):
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+        return await call_next(request)
+
+
+# Create the MCP ASGI app and wrap it with auth
+mcp_app = mcp.streamable_http_app()
+
+# Wrap MCP app in a Starlette app with auth middleware
+from starlette.applications import Starlette
+from starlette.routing import Mount
+
+authed_mcp = Starlette(
+    routes=[Mount("/", app=mcp_app)],
+    middleware=[
+        (BearerAuthMiddleware, {}),
+    ],
+)
+
+app.mount("/mcp", authed_mcp)
 
 
 if __name__ == "__main__":
