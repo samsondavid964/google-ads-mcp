@@ -43,13 +43,62 @@ _access_tokens: dict[str, dict] = {}
 OAUTH_CLIENT_ID = os.environ.get("OAUTH_CLIENT_ID", "google-ads-mcp")
 OAUTH_CLIENT_SECRET = os.environ.get("OAUTH_CLIENT_SECRET", "")
 
+# Paths that don't require bearer token auth
+PUBLIC_PATHS = {
+    "/health",
+    "/authorize",
+    "/token",
+    "/oauth/authorize",
+    "/oauth/token",
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-protected-resource/mcp",
+    "/favicon.ico",
+}
 
+
+def _get_base_url(request: Request) -> str:
+    """Get the external base URL from the request."""
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host", request.url.netloc)
+    return f"{scheme}://{host}"
+
+
+@app.get("/.well-known/oauth-authorization-server")
+async def oauth_metadata(request: Request):
+    """OAuth 2.0 Authorization Server Metadata (RFC 8414)."""
+    base = _get_base_url(request)
+    return {
+        "issuer": base,
+        "authorization_endpoint": f"{base}/authorize",
+        "token_endpoint": f"{base}/token",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": ["client_secret_post"],
+    }
+
+
+@app.get("/.well-known/oauth-protected-resource")
+@app.get("/.well-known/oauth-protected-resource/mcp")
+async def protected_resource_metadata(request: Request):
+    """OAuth 2.0 Protected Resource Metadata."""
+    base = _get_base_url(request)
+    return {
+        "resource": f"{base}/mcp",
+        "authorization_servers": [base],
+    }
+
+
+@app.get("/authorize")
 @app.get("/oauth/authorize")
 async def oauth_authorize(
     response_type: str = "",
     client_id: str = "",
     redirect_uri: str = "",
     state: str = "",
+    code_challenge: str = "",
+    code_challenge_method: str = "",
 ):
     """OAuth 2.0 authorization endpoint. Auto-approves and redirects back with a code."""
     if response_type != "code":
@@ -61,6 +110,8 @@ async def oauth_authorize(
     code = secrets.token_urlsafe(32)
     _auth_codes[code] = {
         "redirect_uri": redirect_uri,
+        "code_challenge": code_challenge,
+        "code_challenge_method": code_challenge_method,
         "created_at": time.time(),
     }
 
@@ -71,14 +122,16 @@ async def oauth_authorize(
     return RedirectResponse(url=f"{redirect_uri}?{urlencode(params)}")
 
 
+@app.post("/token")
 @app.post("/oauth/token")
 async def oauth_token(
     grant_type: str = Form(""),
     code: str = Form(""),
-    redirect_uri: str = Form(""),  # noqa: ARG001
+    redirect_uri: str = Form(""),
     client_id: str = Form(""),
     client_secret: str = Form(""),
     refresh_token: str = Form(""),
+    code_verifier: str = Form(""),
 ):
     """OAuth 2.0 token endpoint. Exchanges auth code for access token."""
     if client_id != OAUTH_CLIENT_ID or client_secret != OAUTH_CLIENT_SECRET:
@@ -91,6 +144,16 @@ async def oauth_token(
         stored = _auth_codes.pop(code)
         if time.time() - stored["created_at"] > 300:
             return JSONResponse(status_code=400, content={"error": "invalid_grant"})
+
+        # PKCE verification
+        if stored.get("code_challenge"):
+            import hashlib
+            import base64
+            expected = base64.urlsafe_b64encode(
+                hashlib.sha256(code_verifier.encode()).digest()
+            ).rstrip(b"=").decode()
+            if expected != stored["code_challenge"]:
+                return JSONResponse(status_code=400, content={"error": "invalid_grant", "error_description": "PKCE verification failed"})
 
         access_token = secrets.token_urlsafe(48)
         new_refresh_token = secrets.token_urlsafe(48)
@@ -121,8 +184,8 @@ async def oauth_token(
 async def validate_bearer_token(request: Request, call_next):
     path = request.url.path
 
-    # Skip auth for health check and OAuth endpoints
-    if path in ("/health", "/oauth/authorize", "/oauth/token"):
+    # Skip auth for public endpoints
+    if path in PUBLIC_PATHS:
         return await call_next(request)
 
     auth_header = request.headers.get("Authorization", "")
